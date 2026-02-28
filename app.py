@@ -17,17 +17,27 @@ if "GOOGLE_API_KEY" not in st.secrets:
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
 def get_model():
-    """Probiert verschiedene Modell-Bezeichnungen, um NotFound-Fehler zu vermeiden."""
-    for model_name in ["gemini-1.5-flash", "models/gemini-1.5-flash", "gemini-1.5-flash-latest"]:
-        try:
-            m = genai.GenerativeModel(model_name)
-            # Test-Aufruf um Existenz zu prüfen
-            m.generate_content("test")
-            return m
-        except Exception:
-            continue
-    st.error("❌ Kein verfügbares Gemini-Modell gefunden. Prüfe deinen API-Key!")
-    st.stop()
+    """Fragt Google nach verfügbaren Modellen für diesen spezifischen Key."""
+    try:
+        # Liste alle Modelle auf, die Text generieren können
+        available_models = [m.name for m in genai.list_models() 
+                           if 'generateContent' in m.supported_generation_methods]
+        
+        if not available_models:
+            st.error("Dein API-Key hat Zugriff auf 0 Modelle. Bitte in Google AI Studio prüfen.")
+            st.stop()
+            
+        # Wir suchen bevorzugt nach 'flash', da es schnell und oft kostenlos ist
+        flash_models = [m for m in available_models if 'flash' in m]
+        final_model_name = flash_models[0] if flash_models else available_models[0]
+        
+        st.success(f"Verbunden mit: {final_model_name}") # Nur zum Debuggen, kann später weg
+        return genai.GenerativeModel(final_model_name)
+        
+    except Exception as e:
+        st.error(f"Kritischer API-Fehler: {e}")
+        st.info("Tipp: Überprüfe, ob dein Google-Konto für die Gemini API in deiner Region (EU) freigeschaltet ist.")
+        st.stop()
 
 model = get_model()
 
@@ -149,3 +159,4 @@ else:
     st.title("👤 KI-Interview Training")
     st.image("https://images.unsplash.com/photo-1521737711867-e3b97375f902?auto=format&fit=crop&w=800&q=80")
     st.info("Lade PDFs hoch und wähle deinen Recruiter, um zu starten!")
+
