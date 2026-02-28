@@ -1,1 +1,3 @@
-streamlit, google-generativeai, audio-recorder-streamlit
+streamlit
+google-generativeai
+audio-recorder-streamlit
