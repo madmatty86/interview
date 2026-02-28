@@ -1,143 +1,178 @@
 import streamlit as st
 import google.generativeai as genai
 from audio_recorder_streamlit import audio_recorder
-import time
-from pypdf import PdfReader
 from PIL import Image, ImageDraw
 import io
+from pypdf import PdfReader
+import time
 
-# --- 1. SETUP & MODELL-CHECK ---
-st.set_page_config(page_title="KI Interview-Coach", page_icon="🎙️", layout="wide")
+# --- 1. INITIALISIERUNG & FEHLER-CHECK ---
+st.set_page_config(page_title="KI Interview-Coach Pro", page_icon="🎙️", layout="wide")
 
 if "GOOGLE_API_KEY" not in st.secrets:
-    st.error("Bitte GOOGLE_API_KEY in den Secrets hinterlegen!")
+    st.error("❌ API Key fehlt! Bitte in den Streamlit Secrets (GOOGLE_API_KEY) hinterlegen.")
     st.stop()
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
 
-def get_chat_model():
-    for name in ["models/gemini-1.5-flash", "gemini-1.5-flash"]:
-        try:
-            return genai.GenerativeModel(name)
-        except: continue
-    st.stop()
+# Modell-Suche: Wir fragen Google, welche Namen dein Key akzeptiert
+@st.cache_resource
+def load_robust_model():
+    try:
+        # Wir versuchen die gängigsten Namen nacheinander
+        for m_name in ["gemini-1.5-flash", "models/gemini-1.5-flash", "gemini-pro"]:
+            try:
+                m = genai.GenerativeModel(m_name)
+                m.generate_content("test") # Kurzer Test-Aufruf
+                return m
+            except:
+                continue
+        st.error("Kein passendes Modell gefunden. Bitte API-Key im Google AI Studio prüfen.")
+        st.stop()
+    except Exception as e:
+        st.error(f"Fehler beim Modell-Laden: {e}")
+        st.stop()
 
-model = get_chat_model()
+model = load_robust_model()
 
-# --- 2. SESSION STATE (DAS GEDÄCHTNIS) ---
-if "messages" not in st.session_state: st.session_state.messages = []
-if "q_count" not in st.session_state: st.session_state.q_count = 0
-if "interview_active" not in st.session_state: st.session_state.interview_active = False
-if "start_time" not in st.session_state: st.session_state.start_time = None
+# --- 2. HILFSFUNKTIONEN ---
+def get_pdf_text(file):
+    reader = PdfReader(file)
+    return " ".join([p.extract_text() or "" for p in reader.pages])
 
-MAX_QUESTIONS = 5
-
-# --- 3. HILFSFUNKTIONEN ---
 def speak(text, gender):
-    """Lässt die KI im Browser sprechen."""
+    """Browser-Sprachausgabe via JavaScript"""
     if text:
-        pitch = 1.3 if gender == "Weiblich" else 0.8
-        clean_text = text.replace("'", "\\'").replace("\n", " ")
+        p = 1.3 if gender == "Weiblich" else 0.8
+        t = text.replace("'", "\\'").replace("\n", " ")
         st.components.v1.html(f"""
             <script>
-                var m = new SpeechSynthesisUtterance('{clean_text}');
-                m.lang = 'de-DE'; m.pitch = {pitch};
-                window.speechSynthesis.speak(m);
+                var u = new SpeechSynthesisUtterance('{t}');
+                u.lang = 'de-DE'; u.pitch = {p};
+                window.speechSynthesis.speak(u);
             </script>
         """, height=0)
 
-def extract_pdf(file):
-    reader = PdfReader(file)
-    return " ".join([p.extract_text() for p in reader.pages if p.extract_text()])
+def make_feedback_img(text):
+    img = Image.new('RGB', (800, 800), color=(245, 247, 250))
+    d = ImageDraw.Draw(img)
+    d.rectangle([0,0,800,80], fill=(0,104,201))
+    d.text((20,25), "Dein Interview-Ergebnis", fill=(255,255,255))
+    y = 120
+    for line in text.split('\n')[:35]:
+        d.text((20, y), line[:85], fill=(50,50,50))
+        y += 20
+    b = io.BytesIO()
+    img.save(b, format="PNG")
+    return b.getvalue()
 
-# --- 4. SIDEBAR (EINSTELLUNGEN) ---
+# --- 3. SESSION STATE (GEDÄCHTNIS) ---
+if "history" not in st.session_state: st.session_state.history = []
+if "step" not in st.session_state: st.session_state.step = 0 # 0=Setup, 1=Interview, 2=Analyse
+if "q_num" not in st.session_state: st.session_state.q_num = 1
+if "start_t" not in st.session_state: st.session_state.start_t = None
+
+MAX_Q = 5
+
+# --- 4. SIDEBAR SETUP ---
 with st.sidebar:
     st.title("👤 Recruiter Setup")
-    voice = st.radio("Interviewer:", ["👩 Julia", "👨 Stefan"])
-    gender = "Weiblich" if "Julia" in voice else "Männlich"
+    v_choice = st.radio("Interviewer:", ["👩 Julia", "👨 Stefan"])
+    gender = "Weiblich" if "Julia" in v_choice else "Männlich"
     
     st.divider()
-    up_job = st.file_uploader("Job-Profil (PDF)", type="pdf")
+    up_job = st.file_uploader("Stellenanzeige (PDF)", type="pdf")
     up_cv = st.file_uploader("Lebenslauf (PDF)", type="pdf")
     
-    if st.button("🚀 Gespräch jetzt starten", use_container_width=True):
+    if st.button("🚀 Gespräch starten", use_container_width=True):
         if up_job and up_cv:
-            # Initialisierung
-            job_txt = extract_pdf(up_job)
-            cv_txt = extract_pdf(up_cv)
-            st.session_state.messages = [{
-                "role": "system", 
-                "parts": [f"Du bist ein Recruiter. Job: {job_txt}. Bewerber-CV: {cv_txt}. Ziel: Führe ein rundenbasiertes Gespräch. Stelle genau eine Frage nach der anderen. Warte immer auf die Antwort. Sei professionell."]
-            }]
-            st.session_state.q_count = 1
-            st.session_state.interview_active = True
-            st.session_state.start_time = time.time()
+            job_txt = get_pdf_text(up_job)
+            cv_txt = get_pdf_text(up_cv)
             
-            # Die Begrüßung + erste Frage
-            res = model.generate_content(st.session_state.messages + [{"role": "user", "parts": ["Begrüße mich kurz und stelle die erste Frage."]}])
-            st.session_state.messages.append({"role": "model", "parts": [res.text]})
+            # Start-Prompt
+            sys_msg = f"Du bist Recruiter. Job: {job_txt}. CV: {cv_txt}. Stelle 5 Fragen, eine nach der anderen. Warte auf Antwort."
+            st.session_state.history = [{"role": "user", "parts": [sys_msg]}]
+            
+            # Begrüßung generieren
+            res = model.generate_content(st.session_state.history + [{"role": "user", "parts": ["Begrüße mich kurz und stelle Frage 1."]}])
+            st.session_state.history.append({"role": "model", "parts": [res.text]})
+            
+            st.session_state.step = 1
+            st.session_state.q_num = 1
+            st.session_state.start_t = time.time()
             st.rerun()
+        else:
+            st.warning("Bitte beide PDFs hochladen!")
 
-    if st.button("🗑️ Alles zurücksetzen"):
+    if st.button("🗑️ App zurücksetzen"):
         st.session_state.clear()
         st.rerun()
 
-# --- 5. HAUPTFENSTER (INTERVIEW) ---
-st.title("📞 Live-Interview Simulation")
+# --- 5. HAUPTFENSTER ---
+st.title("📞 Telefoninterview Simulator")
 
-if st.session_state.interview_active:
-    col_av, col_chat = st.columns([1, 2])
+if st.session_state.step == 1: # INTERVIEW LÄUFT
+    col1, col2 = st.columns([1, 2])
     
-    with col_av:
-        img_url = "https://cdn-icons-png.flaticon.com/512/4140/4140047.png" if gender == "Weiblich" else "https://cdn-icons-png.flaticon.com/512/4140/4140048.png"
-        st.image(img_url, width=150)
-        st.write(f"**Status:** Frage {st.session_state.q_count} von {MAX_QUESTIONS}")
-        st.progress(st.session_state.q_count / MAX_QUESTIONS)
+    with col1:
+        img = "https://cdn-icons-png.flaticon.com/512/4140/4140047.png" if gender == "Weiblich" else "https://cdn-icons-png.flaticon.com/512/4140/4140048.png"
+        st.image(img, width=180)
+        st.metric("Fortschritt", f"{st.session_state.q_num} / {MAX_Q}")
+        st.progress(st.session_state.q_num / MAX_Q)
         
-        # Automatische Sprachausgabe der letzten KI-Nachricht
-        if st.session_state.messages[-1]["role"] == "model":
-            speak(st.session_state.messages[-1]["parts"][0], gender)
+        # Stoppuhr
+        sec = int(time.time() - st.session_state.start_t)
+        st.write(f"⏱️ Zeit: {sec//60:02d}:{sec%60:02d}")
+        
+        # Audio-Ausgabe der letzten Nachricht
+        if st.session_state.history[-1]["role"] == "model":
+            speak(st.session_state.history[-1]["parts"][0], gender)
 
-    with col_chat:
-        # Chat-Historie anzeigen
-        for m in st.session_state.messages:
-            if m["role"] != "system":
+    with col2:
+        # Chat anzeigen
+        for m in st.session_state.history:
+            if m["role"] != "user" or "Du bist Recruiter" not in m["parts"][0]:
                 with st.chat_message("assistant" if m["role"] == "model" else "user"):
                     st.write(m["parts"][0])
 
-        # EINGABE: Sprache oder Text
+        # Eingabe
         st.divider()
-        audio_bytes = audio_recorder(text="Antwort einsprechen...", icon_size="2x", neutral_color="#0068c9")
-        user_text = st.chat_input("Oder hier tippen...")
+        audio = audio_recorder(text="Antwort sprechen", icon_size="2x")
+        u_text = st.chat_input("Oder hier tippen...")
 
-        # LOGIK: Antwort verarbeiten
-        if (audio_bytes or user_text) and st.session_state.q_count <= MAX_QUESTIONS:
-            if audio_bytes:
-                # Sprache direkt an Gemini senden
+        if (audio or u_text) and st.session_state.q_num <= MAX_Q:
+            # Falls Audio kommt, schicken wir es als File zu Gemini
+            if audio:
                 with st.spinner("KI hört zu..."):
-                    user_msg = {"role": "user", "parts": [{"mime_type": "audio/wav", "data": audio_bytes}]}
-                    st.session_state.messages.append({"role": "user", "parts": ["(Audio-Antwort gesendet)"]})
+                    # Wir speichern das Audio kurz als part
+                    user_part = {"mime_type": "audio/wav", "data": audio}
+                    # Für die Anzeige im Chat nutzen wir Text
+                    st.session_state.history.append({"role": "user", "parts": ["🎤 (Audio-Antwort)"]})
             else:
-                user_msg = {"role": "user", "parts": [user_text]}
-                st.session_state.messages.append(user_msg)
+                user_part = u_text
+                st.session_state.history.append({"role": "user", "parts": [u_text]})
 
-            # Nächster Schritt
-            if st.session_state.q_count < MAX_QUESTIONS:
-                st.session_state.q_count += 1
-                response = model.generate_content(st.session_state.messages + [user_msg])
-                st.session_state.messages.append({"role": "model", "parts": [response.text]})
+            # Nächste Runde
+            if st.session_state.q_num < MAX_Q:
+                st.session_state.q_num += 1
+                # KI Antwort holen
+                res = model.generate_content(st.session_state.history + [{"role": "user", "parts": [user_part if audio else u_text]}])
+                st.session_state.history.append({"role": "model", "parts": [res.text]})
                 st.rerun()
             else:
-                # FINALE ANALYSE
-                st.session_state.interview_active = False
-                with st.spinner("Analyse wird erstellt..."):
-                    res = model.generate_content(st.session_state.messages + [{"role": "user", "parts": ["Das Interview ist beendet. Gib mir ein detailliertes Feedback zu meinen Antworten (Stärken/Schwächen)."]}])
-                    st.session_state.analysis = res.text
+                st.session_state.step = 2
                 st.rerun()
 
-elif "analysis" in st.session_state:
+elif st.session_state.step == 2: # ANALYSE
     st.balloons()
-    st.header("🎯 Dein Feedback")
-    st.markdown(st.session_state.analysis)
-else:
-    st.info("👈 Lade links deine PDFs hoch und klicke auf 'Start'.")
+    st.header("🏁 Analyse deines Interviews")
+    with st.spinner("Berechne Feedback..."):
+        full_hist = "\n".join([p["parts"][0] for p in st.session_state.history if isinstance(p["parts"][0], str)])
+        analysis = model.generate_content(f"Analysiere dieses Interview (Stärken/Schwächen): {full_hist}")
+        st.markdown(analysis.text)
+        
+        btn_data = make_feedback_img(analysis.text)
+        st.download_button("🖼️ Ergebnis als Bild speichern", btn_data, "feedback.png", "image/png")
+
+else: # STARTSEITE
+    st.info("Willkommen! Lade links deine PDFs hoch, um das Training zu starten.")
