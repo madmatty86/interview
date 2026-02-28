@@ -2,3 +2,4 @@ streamlit
 google-generativeai
 audio-recorder-streamlit
 Pillow
+pypdf
