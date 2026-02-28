@@ -4,25 +4,31 @@ from audio_recorder_streamlit import audio_recorder
 from PIL import Image, ImageDraw
 import io
 from pypdf import PdfReader
+import time
 
 # 1. Seiteneinstellungen
 st.set_page_config(page_title="KI Interview-Coach Pro", page_icon="👤", layout="wide")
 
-# 2. API Key Prüfung
+# 2. Absturzsicherung & API Initialisierung
 if "GOOGLE_API_KEY" not in st.secrets:
-    st.error("❌ API Key fehlt! Bitte in den Streamlit Secrets hinterlegen.")
+    st.error("❌ API Key fehlt! Bitte in den Streamlit Secrets hinterlegen (GOOGLE_API_KEY).")
     st.stop()
 
 genai.configure(api_key=st.secrets["GOOGLE_API_KEY"])
-model = genai.GenerativeModel('gemini-1.5-flash')
+
+# FIX: Wir nutzen hier den expliziten Pfad 'models/gemini-1.5-flash'
+try:
+    model = genai.GenerativeModel('models/gemini-1.5-flash')
+except Exception as e:
+    st.error(f"Fehler beim Laden des Modells: {e}")
+    st.stop()
 
 # 3. Hilfsfunktionen
 def extract_text_from_pdf(pdf_file):
-    """Liest Text aus einer hochgeladenen PDF-Datei."""
     reader = PdfReader(pdf_file)
     text = ""
     for page in reader.pages:
-        text += page.extract_text()
+        text += page.extract_text() or ""
     return text
 
 def speak(text, gender="Weiblich"):
@@ -40,19 +46,19 @@ def speak(text, gender="Weiblich"):
         st.components.v1.html(html_code, height=0)
 
 def create_feedback_image(text):
-    img = Image.new('RGB', (800, 600), color=(245, 247, 250))
+    img = Image.new('RGB', (800, 800), color=(245, 247, 250))
     d = ImageDraw.Draw(img)
     d.rectangle([0, 0, 800, 80], fill=(0, 104, 201))
     d.text((30, 25), "Mein KI-Interview Feedback", fill=(255, 255, 255))
     y_pos = 120
-    for line in text.split('\n')[:20]:
-        d.text((30, y_pos), line[:80], fill=(40, 40, 40))
-        y_pos += 22
+    for line in text.split('\n')[:30]:
+        d.text((30, y_pos), line[:85], fill=(40, 40, 40))
+        y_pos += 20
     buf = io.BytesIO()
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-# 4. Session State
+# 4. Session State initialisieren
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "interview_started" not in st.session_state:
@@ -61,53 +67,47 @@ if "analysis_done" not in st.session_state:
     st.session_state.analysis_done = False
 if "q_count" not in st.session_state:
     st.session_state.q_count = 0
-if "job_text" not in st.session_state:
-    st.session_state.job_text = ""
-if "cv_text" not in st.session_state:
-    st.session_state.cv_text = ""
+if "start_time" not in st.session_state:
+    st.session_state.start_time = None
 
 MAX_QUESTIONS = 5
-
-# Avatare (Beispiel-URLs für professionelle AI-Porträts)
-AVATAR_FEMALE = "https://raw.githubusercontent.com/Ashwin-S-Kurup/streamlit-chat-avatar/main/avatar_female.png"
-AVATAR_MALE = "https://raw.githubusercontent.com/Ashwin-S-Kurup/streamlit-chat-avatar/main/avatar_male.png"
+AVATAR_FEMALE = "https://cdn-icons-png.flaticon.com/512/4140/4140047.png"
+AVATAR_MALE = "https://cdn-icons-png.flaticon.com/512/4140/4140048.png"
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title("📂 Unterlagen & Setup")
-    voice_option = st.radio("Dein Gegenüber:", ["👩 Recruiterin (Julia)", "👨 Recruiter (Stefan)"])
+    st.title("📂 Setup")
+    voice_option = st.radio("Interviewer:", ["👩 Julia (Recruiterin)", "👨 Stefan (Recruiter)"])
     gender = "Weiblich" if "👩" in voice_option else "Männlich"
-    avatar_url = AVATAR_FEMALE if gender == "Weiblich" else AVATAR_MALE
     
     st.divider()
-    
-    # PDF Uploads
-    uploaded_job = st.file_uploader("Stellenbeschreibung (PDF)", type="pdf")
-    uploaded_cv = st.file_uploader("Dein Lebenslauf (PDF)", type="pdf")
+    up_job = st.file_uploader("Job-Beschreibung (PDF)", type="pdf")
+    up_cv = st.file_uploader("Lebenslauf (PDF)", type="pdf")
     
     if st.button("🚀 Simulation starten", use_container_width=True):
-        if uploaded_job and uploaded_cv:
-            with st.spinner("Lese Dokumente..."):
-                st.session_state.job_text = extract_text_from_pdf(uploaded_job)
-                st.session_state.cv_text = extract_text_from_pdf(uploaded_cv)
-                
-                st.session_state.messages = []
-                st.session_state.q_count = 1
-                st.session_state.interview_started = True
-                st.session_state.analysis_done = False
-                
-                prompt = f"Du bist ein Recruiter. Job: {st.session_state.job_text}. CV: {st.session_state.cv_text}. Führe ein kurzes Interview mit genau {MAX_QUESTIONS} Fragen."
-                st.session_state.messages = [{"role": "system", "content": prompt}]
-                
-                response = model.generate_content(prompt + " Begrüße mich kurz und stelle Frage 1.")
-                st.session_state.messages.append({"role": "assistant", "content": response.text})
-                speak(response.text, gender)
-                st.rerun()
+        if up_job and up_cv:
+            job_txt = extract_text_from_pdf(up_job)
+            cv_txt = extract_text_from_pdf(up_cv)
+            
+            st.session_state.messages = []
+            st.session_state.q_count = 1
+            st.session_state.interview_started = True
+            st.session_state.analysis_done = False
+            st.session_state.start_time = time.time()
+            
+            system_prompt = f"Du bist Recruiter. Job: {job_txt}. CV: {cv_txt}. Stelle 5 kurze Fragen nacheinander."
+            st.session_state.messages = [{"role": "system", "content": system_prompt}]
+            
+            # Erste Frage
+            resp = model.generate_content(system_prompt + " Begrüße mich kurz und stelle Frage 1.")
+            st.session_state.messages.append({"role": "assistant", "content": resp.text})
+            speak(resp.text, gender)
+            st.rerun()
         else:
             st.warning("Bitte beide PDFs hochladen!")
 
     if st.session_state.interview_started:
-        if st.button("🗑️ Abbruch / Reset", use_container_width=True):
+        if st.button("🗑️ Reset", use_container_width=True):
             st.session_state.clear()
             st.rerun()
 
@@ -115,19 +115,23 @@ with st.sidebar:
 if st.session_state.analysis_done:
     st.header("🏁 Deine Analyse")
     history = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages if m['role'] != 'system'])
-    analysis = model.generate_content(f"Gib detailliertes Feedback zum Interview: {history}")
-    st.markdown(analysis.text)
-    st.download_button("🖼️ Analyse als Bild speichern", create_feedback_image(analysis.text), "feedback.png", "image/png")
+    with st.spinner("Erstelle Auswertung..."):
+        analysis = model.generate_content(f"Analysiere dieses Interview detailliert: {history}")
+        st.markdown(analysis.text)
+        st.download_button("🖼️ Als Bild teilen", create_feedback_image(analysis.text), "feedback.png", "image/png")
     st.balloons()
 
 elif st.session_state.interview_started:
-    # Layout mit Avatar
     col_av, col_chat = st.columns([1, 2])
     
     with col_av:
-        st.image(avatar_url, caption=f"Dein Interviewer: {'Julia' if gender == 'Weiblich' else 'Stefan'}")
-        st.progress(st.session_state.q_count / MAX_QUESTIONS, text=f"Frage {st.session_state.q_count}/{MAX_QUESTIONS}")
-        st.info("💡 Tipp: Nutze die Diktierfunktion am Handy zum Antworten!")
+        st.image(AVATAR_FEMALE if gender == "Weiblich" else AVATAR_MALE, width=200)
+        st.subheader(f"Frage {st.session_state.q_count} von {MAX_QUESTIONS}")
+        st.progress(st.session_state.q_count / MAX_QUESTIONS)
+        
+        # Stoppuhr
+        elapsed = int(time.time() - st.session_state.start_time)
+        st.metric("Dauer", f"{elapsed // 60:02d}:{elapsed % 60:02d}")
 
     with col_chat:
         for msg in st.session_state.messages:
@@ -135,28 +139,25 @@ elif st.session_state.interview_started:
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
 
-        if st.session_state.q_count <= MAX_QUESTIONS:
-            user_input = st.chat_input("Deine Antwort...")
-            if user_input:
-                st.session_state.messages.append({"role": "user", "content": user_input})
+        user_input = st.chat_input("Deine Antwort...")
+        if user_input:
+            st.session_state.messages.append({"role": "user", "content": user_input})
+            
+            if st.session_state.q_count < MAX_QUESTIONS:
+                st.session_state.q_count += 1
+                # Verlauf für die KI aufbereiten
+                history = []
+                for m in st.session_state.messages:
+                    role = "user" if m["role"] in ["user", "system"] else "model"
+                    history.append({"role": role, "parts": [m["content"]]})
                 
-                if st.session_state.q_count < MAX_QUESTIONS:
-                    st.session_state.q_count += 1
-                    chat_history = [{"role": "user" if m["role"] in ["user", "system"] else "model", "parts": [m["content"]]} for m in st.session_state.messages]
-                    response = model.generate_content(chat_history)
-                    st.session_state.messages.append({"role": "assistant", "content": response.text})
-                    speak(response.text, gender)
-                    st.rerun()
-                else:
-                    st.session_state.analysis_done = True
-                    st.rerun()
+                resp = model.generate_content(history)
+                st.session_state.messages.append({"role": "assistant", "content": resp.text})
+                speak(resp.text, gender)
+                st.rerun()
+            else:
+                st.session_state.analysis_done = True
+                st.rerun()
 else:
     st.title("👤 KI-Interview Training")
-    st.markdown("""
-    ### So funktioniert's:
-    1. Lade die **Stellenbeschreibung** und deinen **Lebenslauf** als PDF hoch.
-    2. Wähle eine Stimme aus.
-    3. Beantworte die 5 Fragen der KI (am besten laut sprechend).
-    4. Erhalte eine Profi-Analyse deiner Antworten.
-    """)
-    st.image("https://images.unsplash.com/photo-1573497019940-1c28c88b4f3e?auto=format&fit=crop&w=800&q=80", caption="Bereit für dein nächstes Level?")
+    st.info("Lade links deine Dokumente hoch und starte die Simulation!")
