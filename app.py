@@ -4,8 +4,34 @@ from audio_recorder_streamlit import audio_recorder
 import time
 from pypdf import PdfReader
 
-# --- 1. SETUP ---
+# --- 1. SETUP & CSS FÜR DAS BLINKLICHT ---
 st.set_page_config(page_title="KI Interview-Coach Pro", page_icon="🎙️", layout="wide")
+
+# Hier definieren wir das "Pulsieren" des Aufnahmelichts
+st.markdown("""
+    <style>
+    .recording-indicator {
+        height: 20px;
+        width: 20px;
+        background-color: red;
+        border-radius: 50%;
+        display: inline-block;
+        animation: pulse 1.5s infinite;
+        vertical-align: middle;
+        margin-right: 10px;
+    }
+    @keyframes pulse {
+        0% { transform: scale(0.9); opacity: 1; }
+        70% { transform: scale(1.2); opacity: 0.4; }
+        100% { transform: scale(0.9); opacity: 1; }
+    }
+    .status-text {
+        font-weight: bold;
+        color: #ff4b4b;
+        font-family: sans-serif;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 if "GOOGLE_API_KEY" not in st.secrets:
     st.error("❌ Bitte 'GOOGLE_API_KEY' in den Secrets hinterlegen.")
@@ -61,26 +87,23 @@ with st.sidebar:
             job_txt = extract_text_from_pdf(up_job)
             cv_txt = extract_text_from_pdf(up_cv)
             
-            # WICHTIG: Name wird hier fest in den System-Prompt geschrieben
+            # STRENGER SYSTEM PROMPT
             st.session_state.history = [{
                 "role": "user", 
-                "parts": [f"SYSTEM-ORDER: Dein Name ist {recruiter_name} von van Hekk Spedition. "
-                          f"Du interviewst den Bewerber für den Job: {job_txt}. Sein CV: {cv_txt}. "
-                          f"REGELN: 1. Benutze NIEMALS '[Ihr Name]'. Du BIST {recruiter_name}. "
-                          "2. Stelle NUR EINE Frage pro Runde. 3. Wenn die Antwort des Bewerbers "
-                          "keinen Sinn ergibt oder nach Hintergrundgeräuschen klingt, bitte ihn höflich, "
-                          "es zu wiederholen, statt darauf einzugehen."]
+                "parts": [f"SYSTEM-ORDER: Dein Name IST {recruiter_name}. Du arbeitest bei van Hekk Spedition. "
+                          f"Du interviewst den Bewerber für: {job_txt}. Sein CV: {cv_txt}. "
+                          f"REGELN: 1. Benutze NIEMALS '[Ihr Name]'. Du heißt {recruiter_name}. "
+                          "2. Antworte als Mensch. 3. Ignoriere Hintergrundrauschen. "
+                          "4. Wenn die Antwort des Users keinen Sinn ergibt oder nach Fernseher klingt, hake höflich nach."]
             }]
             
-            res = model.generate_content(st.session_state.history + [{"role": "user", "parts": [f"Stelle dich als {recruiter_name} vor und beginne mit Frage 1."]}])
+            res = model.generate_content(st.session_state.history + [{"role": "user", "parts": [f"Stelle dich als {recruiter_name} vor und stelle Frage 1."]}])
             st.session_state.history.append({"role": "model", "parts": [res.text]})
-            
             st.session_state.interview_active = True
             st.session_state.q_num = 1
             st.rerun()
 
 # --- 5. HAUPTFENSTER ---
-
 st.title("📞 Live-Interview Coach")
 
 if st.session_state.interview_active:
@@ -90,7 +113,7 @@ if st.session_state.interview_active:
         img = "https://cdn-icons-png.flaticon.com/512/4140/4140047.png" if gender == "Weiblich" else "https://cdn-icons-png.flaticon.com/512/4140/4140048.png"
         st.image(img, width=150)
         st.write(f"**Interviewer:** {recruiter_name}")
-        st.write(f"**Frage:** {st.session_state.q_num} / {MAX_QUESTIONS}")
+        st.write(f"**Fortschritt:** {st.session_state.q_num} / {MAX_QUESTIONS}")
         
         if st.session_state.history[-1]["role"] == "model":
             speak(st.session_state.history[-1]["parts"][0], gender)
@@ -102,29 +125,32 @@ if st.session_state.interview_active:
                     st.write(m["parts"][0])
 
         st.divider()
-        # Mikrofon-Button
-        audio_bytes = audio_recorder(text="Klicken, sprechen, dann erneut klicken zum Stoppen", icon_size="2x", key=f"rec_{st.session_state.q_num}")
+        
+        # --- DAS BLINKLICHT ---
+        # Es erscheint nur, wenn die KI gerade nicht arbeitet
+        if not st.session_state.processing:
+            st.markdown('<div><span class="recording-indicator"></span><span class="status-text">BEREIT - Bitte jetzt sprechen...</span></div>', unsafe_allow_html=True)
+        
+        audio_bytes = audio_recorder(text="Klicken zum Sprechen / Stoppen", icon_size="3x", key=f"rec_{st.session_state.q_num}")
         text_input = st.chat_input("Oder hier tippen...")
 
         if (audio_bytes or text_input) and not st.session_state.processing:
             st.session_state.processing = True
             
             if audio_bytes:
-                with st.spinner("Verarbeite Audio..."):
-                    # Spezieller Prompt für die Transkription, um Müll zu filtern
+                with st.spinner("Filtere Hintergrundgeräusche..."):
                     trans_res = model.generate_content([
                         {"mime_type": "audio/wav", "data": audio_bytes},
-                        "Transkribiere dieses Interview-Audio. Wenn nur Rauschen oder "
-                        "Hintergrundgespräche zu hören sind, antworte NUR mit dem Wort: [UNVERSTÄNDLICH]."
+                        "Transkribiere dieses Interview-Audio. Falls nur Rauschen, "
+                        "Musik oder fernsehähnliche Sätze zu hören sind, antworte NUR mit: [SKIP]."
                     ])
                     user_text = trans_res.text
             else:
                 user_text = text_input
 
-            # Wenn die Transkription Müll war, fordern wir eine Wiederholung an
-            if "[UNVERSTÄNDLICH]" in user_text:
-                st.session_state.history.append({"role": "user", "parts": ["(Rauschen/Hintergrundgeräusche)"]})
-                st.session_state.history.append({"role": "model", "parts": ["Entschuldigung, das habe ich akustisch nicht verstanden. Könnten Sie das bitte wiederholen?"]})
+            # Müll-Filter Logik
+            if "[SKIP]" in user_text:
+                st.warning("Akustik war unklar. Bitte noch einmal versuchen.")
                 st.session_state.processing = False
                 st.rerun()
             else:
@@ -141,3 +167,8 @@ if st.session_state.interview_active:
                     st.session_state.show_analysis = True
                     st.session_state.processing = False
                     st.rerun()
+
+elif st.session_state.get("show_analysis"):
+    st.header("🏁 Auswertung")
+    # ... (Analyse-Logik wie vorher)
+    st.info("Das Interview ist beendet. Starte die Analyse über den Button in der Sidebar neu.")
